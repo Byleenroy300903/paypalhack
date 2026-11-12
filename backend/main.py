@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import select, text
 from .config import get_settings
 from .database import (agents, checkout_sessions, engine, get_run, initialize, now, negotiations,
                        reputation_history, transaction_view, transactions, uid, verification_results)
@@ -85,6 +85,7 @@ def health():
         connection.execute(select(agents.c.id).limit(1))
     settings = get_settings()
     return dict(status='ok', payment_mode='sandbox' if settings.paypal_client_id and settings.paypal_client_secret else 'demo',
+                workflow_transport='request' if settings.vercel else 'websocket',
                 ai='ollama-cloud' if settings.ollama_api_key else 'deterministic-demo',
                 elastic_configured=bool(settings.elasticsearch_url),
                 paypal_sandbox_configured=bool(settings.paypal_client_id and settings.paypal_client_secret),
@@ -146,6 +147,17 @@ async def start_run(request: RunRequest):
         if checkout_token:
             connection.execute(checkout_sessions.insert().values(transaction_id=run_id,
                 token_hash=hashlib.sha256(checkout_token.encode()).hexdigest(), expires_at=time.time() + 86400))
+    if settings.vercel:
+        try:
+            async with asyncio.timeout(240):
+                await execute(run_id)
+        except TimeoutError:
+            logging.getLogger('nexus').warning('Workflow %s exceeded the request deadline', run_id)
+            with engine.begin() as connection:
+                connection.execute(transactions.update().where(transactions.c.id == run_id).values(
+                    status='failed', error='Workflow exceeded the Vercel request deadline. Start a new mission.'))
+        return dict(id=run_id, status=require_run(run_id)['status'], mode=payment_mode,
+                    websocket=None, checkout_token=checkout_token)
     task = asyncio.create_task(execute(run_id))
     tasks.add(task)
     task.add_done_callback(tasks.discard)
@@ -209,9 +221,26 @@ async def stream_run(websocket: WebSocket, run_id: str):
         return
 
 
+@asynccontextmanager
+async def payment_lock(run_id: str):
+    if engine.dialect.name == 'postgresql':
+        # A transaction-scoped lock also works through Neon's transaction pooler.
+        key = int.from_bytes(hashlib.sha256(run_id.encode()).digest()[:8], 'big', signed=True)
+        with engine.begin() as connection:
+            deadline = time.monotonic() + 15
+            while not connection.execute(text('SELECT pg_try_advisory_xact_lock(:key)'), {'key': key}).scalar_one():
+                if time.monotonic() >= deadline:
+                    raise HTTPException(409, 'Another checkout operation is in progress. Retry shortly.')
+                await asyncio.sleep(.1)
+            yield
+    else:
+        lock = payment_locks.setdefault(run_id, asyncio.Lock())
+        async with lock:
+            yield
+
+
 async def payment_operation(run_id: str, operation: str) -> dict:
-    lock = payment_locks.setdefault(run_id, asyncio.Lock())
-    async with lock:
+    async with payment_lock(run_id):
         run = require_run(run_id)
         if run['status'] != 'completed':
             raise HTTPException(409, 'A verified, completed contract is required')
@@ -361,5 +390,5 @@ async def capture_payment(run_id: str):
 
 
 dist = Path(__file__).resolve().parents[1] / 'dist' / 'nexus' / 'browser'
-if dist.exists():
+if dist.exists() and not get_settings().vercel:
     app.mount('/', StaticFiles(directory=dist, html=True), name='frontend')

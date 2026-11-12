@@ -1,4 +1,5 @@
 import { Injectable, computed, signal } from '@angular/core';
+import { apiUrl } from './api';
 
 export interface Agent {
   id: string; name: string; role: string; initials: string; color: string;
@@ -18,6 +19,7 @@ export interface Checkout {
 interface ProviderHealth {
   status: string; ai: string; ollama_model: string | null;
   elastic_configured: boolean; paypal_sandbox_configured: boolean;
+  workflow_transport?: 'request' | 'websocket';
 }
 export interface ReputationEntry {
   id: string; before: number; after: number; reason: string; created_at: string;
@@ -93,7 +95,7 @@ export class NexusService {
   }
   async connect() {
     try {
-      const response = await fetch('/api/health', { signal: AbortSignal.timeout(2000) });
+      const response = await fetch(apiUrl('/api/health'), { signal: AbortSignal.timeout(15000) });
       if (!response.ok) throw new Error('Backend is unavailable.');
       const health = await response.json() as ProviderHealth;
       if (health.status === 'ok') {
@@ -102,14 +104,17 @@ export class NexusService {
         await this.refreshWorkspace();
         await this.restoreCheckout();
       }
-    } catch { this.engine.set('browser'); this.providers.set(null); }
+    } catch (error) {
+      this.engine.set('browser'); this.providers.set(null);
+      this.workspaceError.set(error instanceof Error ? error.message : 'Backend connection failed.');
+    }
   }
   async refreshWorkspace() {
     if (this.engine() !== 'server') return;
     try {
       const [agentsResponse, transactionsResponse] = await Promise.all([
-        fetch('/api/agents', { signal: AbortSignal.timeout(5000) }),
-        fetch('/api/transactions', { signal: AbortSignal.timeout(5000) })
+        fetch(apiUrl('/api/agents'), { signal: AbortSignal.timeout(15000) }),
+        fetch(apiUrl('/api/transactions'), { signal: AbortSignal.timeout(15000) })
       ]);
       if (!agentsResponse.ok || !transactionsResponse.ok) throw new Error('Backend dashboard data could not be loaded.');
       const backendAgents = await agentsResponse.json() as Array<Pick<Agent, 'id' | 'trust' | 'success' | 'jobs' | 'disputes' | 'price'>>;
@@ -131,7 +136,7 @@ export class NexusService {
     this.reputationHistory.set([]);
     if (this.engine() !== 'server') return;
     try {
-      const response = await fetch(`/api/agents/${encodeURIComponent(agentId)}/reputation`, { signal: AbortSignal.timeout(5000) });
+      const response = await fetch(apiUrl(`/api/agents/${encodeURIComponent(agentId)}/reputation`), { signal: AbortSignal.timeout(15000) });
       if (!response.ok) throw new Error('Reputation history could not be loaded.');
       this.reputationHistory.set(await response.json() as ReputationEntry[]);
       this.workspaceError.set('');
@@ -202,7 +207,7 @@ export class NexusService {
   }
   private async startServer() {
     try {
-      const response = await fetch('/api/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ task: this.task(), budget: this.budget(), payment_mode: this.paymentMode() }), signal: AbortSignal.timeout(10000) });
+      const response = await fetch(apiUrl('/api/runs'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ task: this.task(), budget: this.budget(), payment_mode: this.paymentMode() }), signal: AbortSignal.timeout(this.providers()?.workflow_transport === 'request' ? 270000 : 10000) });
       if (!response.ok) throw new Error((await response.json()).detail ?? 'The workflow could not be started.');
       const run = await response.json(); this.runId.set(run.id);
       if (typeof run.checkout_token === 'string') {
@@ -214,7 +219,13 @@ export class NexusService {
           this.checkoutError.set('Browser storage is blocked. Checkout works in this page, but cannot resume after a PayPal redirect. Allow session storage before continuing.');
         }
       }
-      this.socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/ws/${run.id}`);
+      if (run.websocket === null || this.providers()?.workflow_transport === 'request') {
+        await this.recoverRun();
+        return;
+      }
+      const socketUrl = new URL(apiUrl(`/api/ws/${run.id}`), location.origin);
+      socketUrl.protocol = socketUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+      this.socket = new WebSocket(socketUrl);
       this.socket.onmessage = message => {
         const event = JSON.parse(message.data);
         if (event.type === 'event') { this.stage.set(event.stage); this.append(event); }
@@ -228,7 +239,7 @@ export class NexusService {
   private async recoverRun() {
     for (let attempt = 0; attempt < 120 && this.running(); attempt++) {
       try {
-        const response = await fetch(`/api/runs/${this.runId()}`, { signal: AbortSignal.timeout(3000) });
+        const response = await fetch(apiUrl(`/api/runs/${this.runId()}`), { signal: AbortSignal.timeout(15000) });
         if (!response.ok) throw new Error('Run not found');
         const run = await response.json();
         for (const event of run.events) { this.stage.set(event.stage); this.append(event); }
@@ -275,7 +286,7 @@ export class NexusService {
         throw new Error('Allow browser session storage before starting PayPal checkout so it can resume after buyer approval.');
       }
     }
-    const response = await fetch(path, {
+    const response = await fetch(apiUrl(path), {
       method, headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(60000)
     });
     const result = await response.json();
@@ -338,7 +349,7 @@ export class NexusService {
   private async syncRunEvents(runId: string) {
     if (!runId || this.runId() !== runId) return;
     try {
-      const response = await fetch(`/api/runs/${runId}`, { signal: AbortSignal.timeout(5000) });
+      const response = await fetch(apiUrl(`/api/runs/${runId}`), { signal: AbortSignal.timeout(15000) });
       if (response.ok) for (const event of (await response.json()).events as NexusEvent[]) this.append(event);
     } catch {}
   }
@@ -347,7 +358,7 @@ export class NexusService {
     this.auditBusy.set(true); this.auditError.set(''); this.auditEvents.set([]);
     try {
       const params = new URLSearchParams({ q: this.auditQuery() });
-      const response = await fetch(`/api/events/search?${params}`, { signal: AbortSignal.timeout(15000) });
+      const response = await fetch(apiUrl(`/api/events/search?${params}`), { signal: AbortSignal.timeout(30000) });
       const result = await response.json();
       if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : 'Elasticsearch query failed.');
       this.auditEvents.set(result.events as NexusEvent[]);
@@ -357,7 +368,7 @@ export class NexusService {
   }
   download() {
     if (this.engine() === 'server' && this.runId() && !this.governanceReport()) {
-      const anchor = document.createElement('a'); anchor.href = `/api/runs/${this.runId()}/artifact`; anchor.click();
+      const anchor = document.createElement('a'); anchor.href = apiUrl(`/api/runs/${this.runId()}/artifact`); anchor.click();
       return;
     }
     const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="800" viewBox="0 0 800 800"><rect width="800" height="800" fill="#070b12"/><path d="M240 510V290h70l180 150V290h70v220h-70L310 360v150z" fill="#70c3ff"/><text x="400" y="610" text-anchor="middle" fill="white" font-family="sans-serif" font-size="36" letter-spacing="10">NEXUS</text></svg>';

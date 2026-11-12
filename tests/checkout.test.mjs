@@ -11,6 +11,7 @@ const token = 'unit-test-checkout-capability';
 let server;
 let browser;
 let baseUrl;
+const configuredApiOrigin = process.env.NEXUS_API_URL?.replace(/\/$/, '');
 
 before(async () => {
   const root = resolve('dist', 'nexus', 'browser');
@@ -35,7 +36,7 @@ after(async () => {
   await new Promise(resolve => server ? server.close(resolve) : resolve());
 });
 
-async function workspace({ savedCheckout = true, failedOrder = false, failedSearch = false } = {}) {
+async function workspace({ savedCheckout = true, failedOrder = false, failedSearch = false, requestBound = false } = {}) {
   const context = await browser.newContext();
   if (savedCheckout) await context.addInitScript(({ runId, token }) => {
     sessionStorage.setItem(`nexus-checkout-${runId}`, token);
@@ -44,11 +45,12 @@ async function workspace({ savedCheckout = true, failedOrder = false, failedSear
   const state = { order: false, approved: false, authorized: false, captured: false, calls: [] };
   await context.route('**/*', async route => {
     const url = new URL(route.request().url());
-    if (url.origin !== baseUrl) { await route.abort(); return; }
+    if (url.origin !== baseUrl && url.origin !== configuredApiOrigin) { await route.abort(); return; }
     if (!url.pathname.startsWith('/api/')) { await route.continue(); return; }
+    assert.equal(url.origin, configuredApiOrigin ?? baseUrl);
     const path = url.pathname;
     const json = body => route.fulfill({ json: body });
-    if (path === '/api/health') return json({ status: 'ok', ai: 'ollama-cloud', ollama_model: 'gpt-oss:120b', elastic_configured: true, paypal_sandbox_configured: true });
+    if (path === '/api/health') return json({ status: 'ok', ai: 'ollama-cloud', ollama_model: 'gpt-oss:120b', elastic_configured: true, paypal_sandbox_configured: true, workflow_transport: requestBound ? 'request' : 'websocket' });
     if (path === '/api/agents' || path.endsWith('/reputation')) return json([]);
     if (path === '/api/transactions') return json(savedCheckout ? [{
       id: runId, agent: 'Aura Creative', task: 'Create a logo', trust: state.captured ? 98.2 : 98,
@@ -63,8 +65,13 @@ async function workspace({ savedCheckout = true, failedOrder = false, failedSear
     if (path === '/api/runs' && route.request().method() === 'POST') {
       const request = route.request().postDataJSON();
       assert.equal(request.payment_mode, 'sandbox');
-      return route.fulfill({ status: 201, json: { id: runId, mode: 'sandbox', checkout_token: token } });
+      return route.fulfill({ status: 201, json: { id: runId, mode: 'sandbox', checkout_token: token, ...(requestBound ? { websocket: null, status: 'completed' } : {}) } });
     }
+    if (path === `/api/runs/${runId}`) return json({
+      id: runId, status: 'completed',
+      events: [{ sequence: 1, stage: 5, agent: 'Reputation Agent', message: 'Verified delivery recorded.', time: new Date().toISOString() }],
+      transaction: { id: runId, agent: 'Aura Creative', task: 'Create a logo', trust: 98, value: 45, status: 'Completed', delivery: 100, date: '2026-11-11', mode: 'sandbox' }
+    });
     if (path.startsWith(`/api/paypal/${runId}`)) {
       assert.equal(route.request().headers().authorization, `Bearer ${token}`);
       state.calls.push({ path });
@@ -142,10 +149,26 @@ test('sandbox missions request the backend and surface Ollama failure without a 
     await page.routeWebSocket('**/api/ws/**', socket => {
       setTimeout(() => socket.send(JSON.stringify({ type: 'error', message: 'Ollama Cloud negotiation failed. No simulated offer was substituted.' })), 100);
     });
+
     await page.goto(`${baseUrl}/#simulation`);
     await expect(page.getByText('FastAPI engine connected')).toBeVisible();
     await page.getByRole('button', { name: 'Create logo', exact: true }).click();
     await expect(page.getByRole('alert')).toContainText('Ollama Cloud negotiation failed');
     await expect(page.getByText('DELIVERY VERIFIED', { exact: true })).toHaveCount(0);
+  } finally { await context.close(); }
+});
+
+test('Vercel request-bound missions replay results and start checkout without WebSockets', async () => {
+  const { context, page, state } = await workspace({ savedCheckout: false, requestBound: true });
+  let sockets = 0;
+  await page.routeWebSocket('**/api/ws/**', () => { sockets++; });
+  try {
+    await page.goto(`${baseUrl}/#simulation`);
+    await expect(page.getByText('FastAPI engine connected')).toBeVisible();
+    await page.getByRole('button', { name: 'Create logo', exact: true }).click();
+    await expect(page.getByText('DELIVERY VERIFIED', { exact: true })).toBeVisible();
+    await expect.poll(() => state.order).toBe(true);
+    assert.equal(sockets, 0);
+    assert.equal(await page.evaluate(id => sessionStorage.getItem(`nexus-checkout-${id}`), runId), token);
   } finally { await context.close(); }
 });

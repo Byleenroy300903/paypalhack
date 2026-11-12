@@ -2,8 +2,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 from sqlalchemy import (JSON, Boolean, Column, Float, ForeignKey, Integer, MetaData,
-                        Numeric, String, Table, Text, create_engine, select)
+                        Numeric, String, Table, Text, create_engine, select, text)
 from sqlalchemy.engine import make_url
+from sqlalchemy.pool import NullPool
 from .config import PROJECT_ROOT, get_settings
 
 metadata = MetaData()
@@ -62,8 +63,15 @@ def uid() -> str:
 
 def make_engine():
     parsed_url = make_url(get_settings().database_url)
+    if parsed_url.drivername in ('postgres', 'postgresql'):
+        parsed_url = parsed_url.set(drivername='postgresql+psycopg')
+    if parsed_url.get_backend_name() == 'postgresql':
+        return create_engine(parsed_url, pool_pre_ping=True, poolclass=NullPool,
+                             connect_args={'connect_timeout': 10})
     if parsed_url.get_backend_name() != 'sqlite':
-        raise ValueError('This application uses SQLite; set DATABASE_URL to a SQLite URL.')
+        raise ValueError('DATABASE_URL must be a SQLite or PostgreSQL URL.')
+    if get_settings().vercel:
+        raise ValueError('Vercel requires a persistent PostgreSQL DATABASE_URL; SQLite is local-only.')
     if parsed_url.database not in (None, '', ':memory:'):
         database_path = Path(parsed_url.database)
         if not database_path.is_absolute():
@@ -77,12 +85,16 @@ engine = make_engine()
 
 
 def initialize() -> None:
-    metadata.create_all(engine)
     with engine.begin() as connection:
+        if engine.dialect.name == 'postgresql':
+            # Serialize schema creation and seeding across concurrent cold starts.
+            connection.execute(text('SELECT pg_advisory_xact_lock(724019001)'))
+        metadata.create_all(connection)
         for agent in SEED_AGENTS:
             if connection.execute(select(agents.c.id).where(agents.c.id == agent['id'])).first() is None:
                 connection.execute(agents.insert().values(**agent, identity_verified=True))
-        connection.execute(transactions.update().where(transactions.c.status == 'running').values(status='failed', error='Worker restarted. Start a new demo run.'))
+        if not get_settings().vercel:
+            connection.execute(transactions.update().where(transactions.c.status == 'running').values(status='failed', error='Worker restarted. Start a new demo run.'))
 
 
 def get_run(run_id: str) -> dict | None:

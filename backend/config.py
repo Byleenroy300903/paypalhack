@@ -11,6 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=PROJECT_ROOT / '.env', extra='ignore')
     database_url: str = 'sqlite:///./nexus.db'
+    vercel: bool = False
     ollama_api_key: str = ''
     ollama_model: str = 'gpt-oss:120b'
     ollama_timeout: float = Field(default=90, gt=0, le=300)

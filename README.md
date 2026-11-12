@@ -4,6 +4,18 @@
 
 An Angular 20 + FastAPI hackathon application that discovers specialists, evaluates trust, negotiates a logo contract with Ollama Cloud, verifies delivery, and settles through PayPal sandbox buyer approval, authorization and capture. Elasticsearch indexes and searches audit events. Every backend simulation uses the real PayPal sandbox and Elasticsearch; if Ollama Cloud fails for any reason (for example HTTP 402, no usage credits), negotiation uses a labeled hardcoded offer and the run continues.
 
+## Deploy on Vercel
+
+Deploy the frontend and backend as **two projects from the same repository**:
+backend Root Directory = repository root; frontend Root Directory = `frontend`
+(enable including source files outside that directory). Vercel uses managed
+PostgreSQL, such as Neon, while local development keeps SQLite. Set frontend
+`NEXUS_API_URL` to the backend origin, and backend `PUBLIC_URL` / `CORS_ORIGINS`
+to the frontend origin. See the [complete deployment guide](docs/DEPLOYMENT.md)
+for exact settings, environment variables, PayPal return URLs and verification.
+Vercel workflows run inside the request and replay results afterward; local
+development retains background execution and live WebSockets.
+
 ## Run Locally
 
 Requirements: Node 22.12+ (tested with 22.23), Python 3.12+ (tested with 3.12.8), and npm. SQLite needs no separate service. Configure the provider credentials for actual integrations; without PayPal credentials the API falls back to a simulated payment.

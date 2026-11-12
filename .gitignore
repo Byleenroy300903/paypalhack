@@ -1,6 +1,7 @@
 # Dependencies and build output
 node_modules/
 dist/
+.vercel/
 .angular/
 
 # Python environments and caches

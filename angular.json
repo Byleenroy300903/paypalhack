@@ -15,7 +15,8 @@
             "tsConfig": "tsconfig.json",
             "styles": ["src/styles.css"],
             "assets": [{"glob": "**/*", "input": "public"}],
-            "outputPath": "dist/nexus"
+            "outputPath": "dist/nexus",
+            "define": {"NEXUS_API_ORIGIN": "\"\""}
           },
           "configurations": {
             "production": {"outputHashing": "all", "optimization": {"scripts": true, "styles": {"minify": true, "inlineCritical": true}, "fonts": false}, "budgets": [{"type": "initial", "maximumWarning": "3MB", "maximumError": "5MB"}]}
