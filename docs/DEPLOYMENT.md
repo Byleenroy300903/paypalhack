@@ -27,7 +27,8 @@ Import the repository as a Vercel project (for example `nexus-api`):
 | Python | 3.12, pinned by `.python-version` |
 
 The root `requirements.txt` installs the locked backend dependencies, and
-`pyproject.toml` identifies `backend.main:app` as the entrypoint. Do not run
+`app.py` exposes the backend at a standard Vercel entrypoint, and
+`pyproject.toml` identifies `app:app` as that entrypoint. Do not run
 `npm run build` in the backend project.
 
 Add these **backend-only** environment variables for Production:
@@ -126,7 +127,8 @@ otherwise preview runs share production sandbox data.
    browser session. Only a completed capture increases sandbox reputation.
 6. Inspect backend logs and `/api/integrations/check` for provider connectivity.
 
-The function limit is configured to 300 seconds, with a 240-second workflow
+Set the backend function's maximum duration to 300 seconds under Vercel's
+function settings (with Fluid compute enabled), with a 240-second workflow
 deadline and a 270-second browser request timeout. Use Fluid compute and verify
 your plan supports that duration. `STEP_DELAY=0` avoids artificial waits.
 Network interruptions, process termination or redeploys can still interrupt

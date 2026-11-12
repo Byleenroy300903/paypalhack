@@ -1,4 +1,8 @@
 import asyncio
+import importlib
+import json
+from pathlib import Path
+import tomllib
 from unittest.mock import patch
 
 import pytest
@@ -8,6 +12,16 @@ from sqlalchemy.pool import NullPool
 from backend import database, main
 from backend.config import get_settings
 from backend.database import engine, get_run, now, transactions, uid
+
+
+def test_vercel_entrypoint_exports_backend_app():
+    root = Path(__file__).resolve().parents[2]
+    config = json.loads((root / 'vercel.json').read_text())
+    project = tomllib.loads((root / 'pyproject.toml').read_text())
+    assert config['framework'] == 'fastapi'
+    assert 'functions' not in config
+    assert project['tool']['vercel']['entrypoint'] == 'app:app'
+    assert importlib.import_module('app').app is main.app
 
 
 @pytest.mark.parametrize('scheme', ['postgres', 'postgresql', 'postgresql+psycopg'])
