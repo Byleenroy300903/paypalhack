@@ -1,0 +1,11 @@
+node_modules
+.venv
+.angular
+.git
+*.db
+.env
+dist
+playwright-artifacts
+test-results
+__pycache__
+.pytest_cache
